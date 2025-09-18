@@ -6,7 +6,6 @@ This script provides a graphical user interface (GUI) and a command-line interfa
 for processing Excel files containing multiple reports. It intelligently identifies the
 true header row, adds date and worksheet name columns, and consolidates the data into
 clean CSV and JSON files.
-\
 
 Requirements:
 - pandas>=2.0.0
@@ -28,6 +27,7 @@ import tkinter as tk
 import subprocess
 import sys
 import argparse
+import threading # <-- Import threading module
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 from datetime import datetime
@@ -394,7 +394,6 @@ class ExcelDataProcessor:
         except Exception as e:
             log_callback(f"Error generating console summary: {e}")
 
-
 class ReportProcessorApp(tk.Tk):
     """
     Main application window for the Excel Data Processor GUI.
@@ -471,13 +470,18 @@ class ReportProcessorApp(tk.Tk):
         self.log_text.pack(fill=tk.BOTH, expand=True)
         
     def log_message(self, message):
-        """Appends a message to the log text widget."""
+        """Appends a message to the log text widget in a thread-safe manner."""
+        # Use a lambda to pass the message to the actual log function.
+        # This is the crucial part for thread safety with Tkinter.
+        self.after(0, self._do_log_message, message)
+
+    def _do_log_message(self, message):
+        """The actual function that updates the GUI log widget."""
         self.log_text.configure(state='normal')
         self.log_text.insert(tk.END, message + "\n")
         self.log_text.see(tk.END)
         self.log_text.configure(state='disabled')
-        self.update_idletasks()
-
+    
     def check_and_install_dependencies(self):
         """Checks for required libraries and installs them if they are missing."""
         if LIBRARIES_OK:
@@ -555,12 +559,12 @@ class ReportProcessorApp(tk.Tk):
             # If successful, provide a summary of the file.
             self.log_message("\n✓ File is valid and ready for processing!")
             self.log_message("File Information:")
-            self.log_message(f"    - Total worksheets found: {len(all_sheets)}")
+            self.log_message(f"     - Total worksheets found: {len(all_sheets)}")
 
             first_sheet_name = list(all_sheets.keys())[0]
             first_df = all_sheets[first_sheet_name]
             
-            self.log_message(f"    - Displaying head of the first sheet ('{first_sheet_name}'):")
+            self.log_message(f"     - Displaying head of the first sheet ('{first_sheet_name}'):")
             
             # Convert DataFrame to a formatted string to display in the log.
             head_str = first_df.head().to_string()
@@ -575,9 +579,8 @@ class ReportProcessorApp(tk.Tk):
             self.log_message("Please **open the file** in Excel and **save it again** to fix the issue, then try validating it again.")
             messagebox.showerror("Validation Failed", "File validation failed. Please check the log and re-save your file.")
 
-
     def process_report(self):
-        """Starts the report processing."""
+        """Starts the report processing in a separate thread."""
         input_path = self.input_file.get()
         if not input_path or not Path(input_path).exists():
             messagebox.showerror("Error", "Please select a valid input file.")
@@ -589,14 +592,25 @@ class ReportProcessorApp(tk.Tk):
         self.log_text.delete('1.0', tk.END)
         self.log_text.configure(state='disabled')
         
-        input_file_path = Path(input_path)
-        output_dir_path = Path(self.output_dir.get())
+        self.log_message("Starting processing in a background thread...")
         
-        processor = ExcelDataProcessor(input_file_path, output_dir_path)
-        
-        self.log_message("Starting processing...")
-        success, processed_sheets = processor.process_file(self.log_message)
-        
+        # Create and start the worker thread
+        worker_thread = threading.Thread(target=self._threaded_process_task, args=(input_path, self.output_dir.get()))
+        worker_thread.daemon = True
+        worker_thread.start()
+
+    def _threaded_process_task(self, input_path, output_dir_path):
+        """The worker function to be executed in the new thread."""
+        try:
+            processor = ExcelDataProcessor(input_path, output_dir_path)
+            success, processed_sheets = processor.process_file(self.log_message)
+            self.after(0, self._process_completion_callback, success, processed_sheets, processor)
+        except Exception as e:
+            self.log_message(f"An unexpected error occurred in the processing thread: {e}")
+            self.after(0, self._process_completion_callback, False, {}, None)
+
+    def _process_completion_callback(self, success, processed_sheets, processor):
+        """Called by the thread upon completion to update the GUI and enable buttons."""
         if success:
             processor.generate_console_summary(self.log_message, processed_sheets)
             messagebox.showinfo("Success", "File processed successfully!")
